@@ -47,10 +47,10 @@ def check_dependencies():
             missing_deps.append('GCC')
     
     if missing_deps:
-        logger.warning(f"⚠️ Missing dependencies: {', '.join(missing_deps)}")
-        logger.warning("Some features may not work properly.")
+        print(f"⚠️ Missing dependencies: {', '.join(missing_deps)}")
+        print("Some features may not work properly.")
     else:
-        logger.info("✅ All dependencies are available")
+        print("✅ All dependencies are available")
 
 def load_bot_token():
     try:
@@ -325,93 +325,139 @@ auto_notification_interval = 25 * 60  # 25 phút = 1500 giây
 auto_notification_timer = None
 auto_notification_chats = set()  # Lưu trữ các chat_id để gửi thông báo
 
+def send_auto_notification():
+    """Gửi thông báo tự động"""
+    if not auto_notification_enabled or not auto_notification_chats:
+        logger.debug("Auto notification disabled or no chats registered")
+        return
+    
+    try:
+        # Lấy thống kê hệ thống
+        uptime = get_uptime()
+        total_users = 0
+        total_admins = 0
+        today_activities = 0
+        
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM users')
+                total_users = cursor.fetchone()[0]
+                cursor.execute('SELECT COUNT(*) FROM users WHERE is_admin=1')
+                total_admins = cursor.fetchone()[0]
+                cursor.execute('SELECT COUNT(*) FROM activity_logs WHERE date(timestamp) = date("now")')
+                today_activities = cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error getting stats for auto notification: {e}")
+            # Sử dụng giá trị mặc định nếu có lỗi database
+            total_users = 0
+            total_admins = 0
+            today_activities = 0
+        
+        # Đếm số tác vụ đang chạy
+        try:
+            running_tasks_count = sum(1 for proc in running_tasks.values() if proc and proc.poll() is None)
+        except Exception as e:
+            logger.error(f"Error counting running tasks: {e}")
+            running_tasks_count = 0
+        
+        # Tạo thông báo
+        notification_msg = (
+            f"🤖 *BÁO CÁO TÌNH TRẠNG HOẠT ĐỘNG*\n"
+            f"⏰ Thời gian: {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n"
+            f"🕐 Uptime: {uptime}\n"
+            f"👥 Tổng users: {total_users}\n"
+            f"👑 Admins: {total_admins}\n"
+            f"📈 Hoạt động hôm nay: {today_activities}\n"
+            f"🔄 Tác vụ đang chạy: {running_tasks_count}\n"
+            f"💚 Bot hoạt động bình thường"
+        )
+        
+        # Gửi thông báo đến tất cả chat đã đăng ký
+        sent_count = 0
+        for chat_id in list(auto_notification_chats):
+            try:
+                bot.send_message(chat_id, notification_msg, parse_mode='Markdown')
+                sent_count += 1
+                logger.info(f"Auto notification sent to chat {chat_id}")
+            except Exception as e:
+                logger.error(f"Failed to send auto notification to chat {chat_id}: {e}")
+                # Xóa chat_id không hợp lệ
+                auto_notification_chats.discard(chat_id)
+        
+        logger.info(f"Auto notification completed: {sent_count}/{len(auto_notification_chats)} sent successfully")
+        
+        # Lập lịch gửi thông báo tiếp theo
+        if auto_notification_enabled:
+            schedule_next_notification()
+            
+    except Exception as e:
+        logger.error(f"Error in auto notification: {e}")
+        # Thử lại sau 5 phút nếu có lỗi
+        if auto_notification_enabled:
+            threading.Timer(5 * 60, schedule_next_notification).start()
+
 def start_auto_notification():
     """Bắt đầu hệ thống thông báo tự động"""
     global auto_notification_timer
     if auto_notification_timer:
         auto_notification_timer.cancel()
     
-    def send_auto_notification():
-        if not auto_notification_enabled or not auto_notification_chats:
-            return
-        
-        try:
-            # Lấy thống kê hệ thống
-            uptime = get_uptime()
-            total_users = 0
-            total_admins = 0
-            today_activities = 0
-            
-            try:
-                with db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('SELECT COUNT(*) FROM users')
-                    total_users = cursor.fetchone()[0]
-                    cursor.execute('SELECT COUNT(*) FROM users WHERE is_admin=1')
-                    total_admins = cursor.fetchone()[0]
-                    cursor.execute('SELECT COUNT(*) FROM activity_logs WHERE date(timestamp) = date("now")')
-                    today_activities = cursor.fetchone()[0]
-            except Exception as e:
-                logger.error(f"Error getting stats for auto notification: {e}")
-            
-            # Đếm số tác vụ đang chạy
-            running_tasks_count = sum(1 for proc in running_tasks.values() if proc and proc.poll() is None)
-            
-            # Tạo thông báo
-            notification_msg = (
-                f"🤖 *BÁO CÁO TÌNH TRẠNG HOẠT ĐỘNG*\n"
-                f"⏰ Thời gian: {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n"
-                f"🕐 Uptime: {uptime}\n"
-                f"👥 Tổng users: {total_users}\n"
-                f"👑 Admins: {total_admins}\n"
-                f"📈 Hoạt động hôm nay: {today_activities}\n"
-                f"🔄 Tác vụ đang chạy: {running_tasks_count}\n"
-                f"💚 Bot hoạt động bình thường"
-            )
-            
-            # Gửi thông báo đến tất cả chat đã đăng ký
-            for chat_id in list(auto_notification_chats):
-                try:
-                    bot.send_message(chat_id, notification_msg, parse_mode='Markdown')
-                    logger.info(f"Auto notification sent to chat {chat_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send auto notification to chat {chat_id}: {e}")
-                    # Xóa chat_id không hợp lệ
-                    auto_notification_chats.discard(chat_id)
-            
-            # Lập lịch gửi thông báo tiếp theo
-            if auto_notification_enabled:
-                start_auto_notification()
-                
-        except Exception as e:
-            logger.error(f"Error in auto notification: {e}")
-            # Thử lại sau 5 phút nếu có lỗi
-            if auto_notification_enabled:
-                threading.Timer(5 * 60, start_auto_notification).start()
-    
     # Lập lịch gửi thông báo đầu tiên
     auto_notification_timer = threading.Timer(auto_notification_interval, send_auto_notification)
     auto_notification_timer.start()
     logger.info(f"Auto notification system started - will send status every {auto_notification_interval//60} minutes")
 
+def schedule_next_notification():
+    """Lập lịch thông báo tiếp theo"""
+    global auto_notification_timer
+    if auto_notification_enabled:
+        try:
+            if auto_notification_timer:
+                auto_notification_timer.cancel()
+            auto_notification_timer = threading.Timer(auto_notification_interval, send_auto_notification)
+            auto_notification_timer.start()
+            logger.debug(f"Next auto notification scheduled in {auto_notification_interval//60} minutes")
+        except Exception as e:
+            logger.error(f"Error scheduling next notification: {e}")
+            # Thử lại sau 1 phút nếu có lỗi
+            if auto_notification_enabled:
+                threading.Timer(60, schedule_next_notification).start()
+
 def stop_auto_notification():
     """Dừng hệ thống thông báo tự động"""
     global auto_notification_timer, auto_notification_enabled
-    auto_notification_enabled = False
-    if auto_notification_timer:
-        auto_notification_timer.cancel()
-        auto_notification_timer = None
-    logger.info("Auto notification system stopped")
+    try:
+        auto_notification_enabled = False
+        if auto_notification_timer:
+            auto_notification_timer.cancel()
+            auto_notification_timer = None
+        logger.info("Auto notification system stopped successfully")
+    except Exception as e:
+        logger.error(f"Error stopping auto notification system: {e}")
+        # Đảm bảo timer được dừng
+        if auto_notification_timer:
+            try:
+                auto_notification_timer.cancel()
+            except:
+                pass
+            auto_notification_timer = None
 
 def add_auto_notification_chat(chat_id):
     """Thêm chat vào danh sách nhận thông báo tự động"""
-    auto_notification_chats.add(chat_id)
-    logger.info(f"Chat {chat_id} added to auto notification list")
+    try:
+        auto_notification_chats.add(chat_id)
+        logger.info(f"Chat {chat_id} added to auto notification list. Total chats: {len(auto_notification_chats)}")
+    except Exception as e:
+        logger.error(f"Error adding chat {chat_id} to auto notification list: {e}")
 
 def remove_auto_notification_chat(chat_id):
     """Xóa chat khỏi danh sách nhận thông báo tự động"""
-    auto_notification_chats.discard(chat_id)
-    logger.info(f"Chat {chat_id} removed from auto notification list")
+    try:
+        auto_notification_chats.discard(chat_id)
+        logger.info(f"Chat {chat_id} removed from auto notification list. Total chats: {len(auto_notification_chats)}")
+    except Exception as e:
+        logger.error(f"Error removing chat {chat_id} from auto notification list: {e}")
 
 def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
     key = (user_id, chat_id, task_key)
@@ -462,6 +508,9 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
 
 def stop_subprocess(user_id, chat_id, task_key, message):
     key = (user_id, chat_id, task_key)
+    logger.info(f"Attempting to stop task: {task_key} for user {user_id} in chat {chat_id}")
+    logger.info(f"Current running tasks: {list(running_tasks.keys())}")
+    
     proc = running_tasks.get(key)
     if proc and proc.poll() is None:
         try:
@@ -471,16 +520,31 @@ def stop_subprocess(user_id, chat_id, task_key, message):
             else:  # Unix/Linux
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             running_tasks[key] = None
-            sent = bot.reply_to(message, f"✅ Đã dừng tác vụ `{task_key}` thành công.")
-            auto_delete_response(chat_id, message.message_id, sent, delay=10)
+            try:
+                sent = bot.reply_to(message, f"✅ Đã dừng tác vụ `{task_key}` thành công.")
+                auto_delete_response(chat_id, message.message_id, sent, delay=10)
+            except Exception as msg_error:
+                # Nếu không thể reply, gửi tin nhắn mới
+                sent = bot.send_message(chat_id, f"✅ Đã dừng tác vụ `{task_key}` thành công.")
+                auto_delete_response(chat_id, message.message_id, sent, delay=10)
             logger.info(f"User {user_id} chat {chat_id} đã dừng tác vụ {task_key}")
         except Exception as e:
-            sent = bot.reply_to(message, f"❌ Lỗi khi dừng tác vụ `{task_key}`: {e}")
-            auto_delete_response(chat_id, message.message_id, sent, delay=15)
+            try:
+                sent = bot.reply_to(message, f"❌ Lỗi khi dừng tác vụ `{task_key}`: {e}")
+                auto_delete_response(chat_id, message.message_id, sent, delay=15)
+            except Exception as msg_error:
+                # Nếu không thể reply, gửi tin nhắn mới
+                sent = bot.send_message(chat_id, f"❌ Lỗi khi dừng tác vụ `{task_key}`: {e}")
+                auto_delete_response(chat_id, message.message_id, sent, delay=15)
             logger.error(f"Lỗi dừng tác vụ {task_key}: {e}")
     else:
-        sent = bot.reply_to(message, f"ℹ️ Không có tác vụ `{task_key}` nào đang chạy.")
-        auto_delete_response(chat_id, message.message_id, sent, delay=10)
+        try:
+            sent = bot.reply_to(message, f"ℹ️ Không có tác vụ `{task_key}` nào đang chạy.")
+            auto_delete_response(chat_id, message.message_id, sent, delay=10)
+        except Exception as msg_error:
+            # Nếu không thể reply, gửi tin nhắn mới
+            sent = bot.send_message(chat_id, f"ℹ️ Không có tác vụ `{task_key}` nào đang chạy.")
+            auto_delete_response(chat_id, message.message_id, sent, delay=10)
 
 # ========== Tiện ích ==========
 
@@ -594,6 +658,7 @@ def cmd_help(message):
                 "/statusudpbypass - Trạng thái udpbypass\n"
                 "/statusflood - Trạng thái flood.js\n"
                 "/autonotify - Quản lý thông báo tự động\n"
+                "/testudpbypass - Test lệnh udpbypass\n"
             )
         try:
             sent = bot.send_message(message.chat.id, escape_markdown_v2(help_text), parse_mode='MarkdownV2')
@@ -1185,6 +1250,7 @@ def cmd_stop_task(message):
             stop_subprocess(user_id, chat_id, 'flood', message)
         elif cmd.startswith('/stopudpbypass'):
             task_name = "udpbypass"
+            logger.info(f"User {user_id} requesting to stop udpbypass task")
             stop_subprocess(user_id, chat_id, 'udpbypass', message)
         
         # Cập nhật thông báo
@@ -1222,14 +1288,14 @@ def cmd_status_task(message):
         chat_id = message.chat.id
         if 'kill' in cmd:
             task_key = 'killjs'
+        elif 'udpbypass' in cmd:  # Kiểm tra udpbypass trước udp
+            task_key = 'udpbypass'
         elif 'udp' in cmd:
             task_key = 'udp'
         elif 'proxies' in cmd:
             task_key = 'scrapeproxies'
         elif 'flood' in cmd:
             task_key = 'flood'
-        elif 'udpbypass' in cmd:
-            task_key = 'udpbypass'
         else:
             bot.edit_message_text(
                 "❌ Lệnh không hợp lệ.",
@@ -1321,6 +1387,51 @@ def cmd_scrapeproxies(message):
                             chat_id=message.chat.id, 
                             message_id=processing_msg.message_id)
         auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+
+@bot.message_handler(commands=['testudpbypass'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_testudpbypass(message):
+    """Test lệnh udpbypass"""
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🧪 Đang test lệnh udpbypass...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        task_key = "udpbypass"
+        key = (user_id, chat_id, task_key)
+        
+        # Kiểm tra trạng thái hiện tại
+        proc = running_tasks.get(key)
+        status_text = (
+            f"🧪 *TEST LỆNH UDPBYPASS*\n\n"
+            f"👤 User ID: {user_id}\n"
+            f"💬 Chat ID: {chat_id}\n"
+            f"🔑 Task Key: {task_key}\n"
+            f"🔍 Key: {key}\n"
+            f"🔄 Trạng thái tác vụ: {'Đang chạy' if proc and proc.poll() is None else 'Không chạy'}\n"
+            f"📊 Tổng tác vụ đang chạy: {sum(1 for p in running_tasks.values() if p and p.poll() is None)}\n"
+            f"📋 Danh sách tác vụ: {list(running_tasks.keys())}"
+        )
+        
+        bot.edit_message_text(status_text, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=30)
+        
+    except Exception as e:
+        logger.error(f"Error in /testudpbypass: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi xảy ra: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi xảy ra: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['autonotify'])
 @ignore_old_messages
@@ -1444,6 +1555,7 @@ def handle_unknown_message(message):
 # ========== Main chạy bot ==========
 
 def main():
+    # Thiết lập start_time trước
     bot.start_time = datetime.now()
     logger.info(f"🤖 Bot khởi động với token bắt đầu bằng: {Config.TOKEN[:10]}")
     
@@ -1503,8 +1615,13 @@ if __name__ == '__main__':
     finally:
         # Cleanup
         try:
+            # Dừng hệ thống thông báo tự động
+            stop_auto_notification()
+            logger.info("🔔 Auto notification system stopped")
+            
+            # Dừng executor
             executor.shutdown(wait=False)
             logger.info("🧹 Cleanup completed")
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
         sys.exit(0)
